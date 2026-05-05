@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>JSON → MessagePack 转换器</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 32px 16px;
+    }
+    h1 {
+      font-size: 1.6rem;
+      margin-bottom: 8px;
+      color: #a0c4ff;
+      letter-spacing: 1px;
+    }
+    .subtitle {
+      font-size: 0.85rem;
+      color: #888;
+      margin-bottom: 32px;
+    }
+    .container {
+      width: 100%;
+      max-width: 820px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    label {
+      font-size: 0.9rem;
+      color: #aaa;
+      margin-bottom: 6px;
+      display: block;
+    }
+    textarea {
+      width: 100%;
+      height: 220px;
+      background: #0f0f1a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      color: #c9f0a0;
+      font-family: "Fira Mono", "Consolas", monospace;
+      font-size: 0.92rem;
+      padding: 14px;
+      resize: vertical;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    textarea:focus { border-color: #a0c4ff; }
+    .btn-row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    button {
+      padding: 10px 28px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-weight: 600;
+      transition: background 0.2s, transform 0.1s;
+    }
+    button:active { transform: scale(0.97); }
+    #btnConvert {
+      background: #4a90d9;
+      color: #fff;
+    }
+    #btnConvert:hover { background: #5aa3f0; }
+    #btnDownload {
+      background: #2ecc71;
+      color: #fff;
+      display: none;
+    }
+    #btnDownload:hover { background: #3de082; }
+    #btnClear {
+      background: #444;
+      color: #ccc;
+    }
+    #btnClear:hover { background: #555; }
+    #status {
+      font-size: 0.88rem;
+      padding: 4px 0;
+    }
+    .ok  { color: #2ecc71; }
+    .err { color: #e74c3c; }
+    .output-box {
+      background: #0f0f1a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 14px;
+      font-family: "Fira Mono", "Consolas", monospace;
+      font-size: 0.82rem;
+      color: #f0c040;
+      word-break: break-all;
+      min-height: 60px;
+      white-space: pre-wrap;
+    }
+    .info-row {
+      display: flex;
+      gap: 24px;
+      font-size: 0.83rem;
+      color: #888;
+      flex-wrap: wrap;
+    }
+    .info-row span b { color: #ccc; }
+    details summary {
+      cursor: pointer;
+      color: #a0c4ff;
+      font-size: 0.85rem;
+      margin-bottom: 8px;
+      user-select: none;
+    }
+    .hex-grid {
+      font-family: "Fira Mono", "Consolas", monospace;
+      font-size: 0.78rem;
+      color: #aaa;
+      line-height: 1.7;
+    }
+  </style>
+</head>
+<body>
+  <h1>JSON → MessagePack 转换器</h1>
+  <p class="subtitle">纯前端实现，无需任何外部库 · 完整支持 UTF-8 字符串</p>
+
+  <div class="container">
+    <!-- 输入 -->
+    <div>
+      <label>输入 JSON</label>
+      <textarea id="jsonInput" placeholder='{"version": "2.0.0", "extension": {...}}'>{
+  "version": "2.0.0",
+  "extension": {
+    "id": "svg-test",
+    "name": "svg动画",
+    "description": "测试动画",
+    "version": "1.0.0",
+    "author": "阿岳",
+    "icon": "logo-animated.svg"
+  }
+}</textarea>
+    </div>
+
+    <!-- 按钮行 -->
+    <div class="btn-row">
+      <button id="btnConvert" onclick="doConvert()">转换为 MessagePack</button>
+      <button id="btnDownload" onclick="doDownload()">⬇ 下载 .msgpack</button>
+      <button id="btnClear" onclick="doClear()">清空</button>
+      <span id="status"></span>
+    </div>
+
+    <!-- 输出：统计信息 -->
+    <div class="info-row" id="infoRow" style="display:none">
+      <span>JSON 大小：<b id="infoJsonSize">-</b></span>
+      <span>MessagePack 大小：<b id="infoMsgSize">-</b></span>
+      <span>压缩率：<b id="infoRatio">-</b></span>
+    </div>
+
+    <!-- 输出：Hex -->
+    <div id="outputSection" style="display:none">
+      <label>输出 Hex（MessagePack 字节）</label>
+      <div class="output-box" id="hexOutput"></div>
+
+      <details style="margin-top:12px">
+        <summary>▶ 查看格式化 Hex 视图（每行 16 字节）</summary>
+        <div class="hex-grid" id="hexGrid"></div>
+      </details>
+    </div>
+  </div>
+
+  <script>
+  /* ================================================================
+     纯手写 MessagePack 编码器
+     规范参考：https://github.com/msgpack/msgpack/blob/master/spec.md
+
+     与 Python msgpack.packb(data, use_bin_type=True) 行为一致：
+       - str  → fixstr / str8 / str16 / str32（UTF-8 字节）
+       - bytes → bin8 / bin16 / bin32（本页面不处理 bytes 类型）
+       - int  → fixint / int8 / int16 / int32 / int64 / uint*
+       - float → float64
+       - bool  → true / false
+       - null  → nil
+       - Array → fixarray / array16 / array32
+       - Object→ fixmap / map16 / map32
+     ================================================================ */
+
+  /**
+   * 将 JavaScript 值编码为 MessagePack，返回 Uint8Array
+   */
+  function encodeMsgpack(value) {
+    const chunks = [];
+    encodeValue(value, chunks);
+    // 合并所有 chunk
+    const total = chunks.reduce((s, c) => s + c.length, 0);
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      out.set(c, offset);
+      offset += c.length;
+    }
+    return out;
+  }
+
+  function encodeValue(val, chunks) {
+    if (val === null || val === undefined) {
+      chunks.push(new Uint8Array([0xc0])); // nil
+    } else if (typeof val === 'boolean') {
+      chunks.push(new Uint8Array([val ? 0xc3 : 0xc2]));
+    } else if (typeof val === 'number') {
+      encodeNumber(val, chunks);
+    } else if (typeof val === 'string') {
+      encodeString(val, chunks);
+    } else if (Array.isArray(val)) {
+      encodeArray(val, chunks);
+    } else if (typeof val === 'object') {
+      encodeMap(val, chunks);
+    } else {
+      throw new Error('不支持的类型: ' + typeof val);
+    }
+  }
+
+  /* ---------- 数字 ---------- */
+  function encodeNumber(n, chunks) {
+    if (Number.isInteger(n)) {
+      encodeInt(n, chunks);
+    } else {
+      // float64
+      const buf = new ArrayBuffer(9);
+      const view = new DataView(buf);
+      view.setUint8(0, 0xcb);
+      view.setFloat64(1, n, false); // big-endian
+      chunks.push(new Uint8Array(buf));
+    }
+  }
+
+  function encodeInt(n, chunks) {
+    if (n >= 0) {
+      if (n <= 0x7f) {
+        // positive fixint
+        chunks.push(new Uint8Array([n]));
+      } else if (n <= 0xff) {
+        chunks.push(new Uint8Array([0xcc, n])); // uint8
+      } else if (n <= 0xffff) {
+        chunks.push(new Uint8Array([0xcd, n >> 8, n & 0xff])); // uint16
+      } else if (n <= 0xffffffff) {
+        chunks.push(new Uint8Array([0xce,
+          (n >>> 24) & 0xff, (n >>> 16) & 0xff,
+          (n >>> 8) & 0xff, n & 0xff])); // uint32
+      } else {
+        // uint64 — JS 整数精度有限，尽力而为
+        const hi = Math.floor(n / 0x100000000);
+        const lo = n >>> 0;
+        chunks.push(new Uint8Array([0xcf,
+          (hi >>> 24) & 0xff, (hi >>> 16) & 0xff,
+          (hi >>> 8) & 0xff, hi & 0xff,
+          (lo >>> 24) & 0xff, (lo >>> 16) & 0xff,
+          (lo >>> 8) & 0xff, lo & 0xff]));
+      }
+    } else {
+      if (n >= -32) {
+        // negative fixint
+        chunks.push(new Uint8Array([n & 0xff]));
+      } else if (n >= -128) {
+        chunks.push(new Uint8Array([0xd0, n & 0xff])); // int8
+      } else if (n >= -32768) {
+        chunks.push(new Uint8Array([0xd1, (n >> 8) & 0xff, n & 0xff])); // int16
+      } else if (n >= -2147483648) {
+        chunks.push(new Uint8Array([0xd2,
+          (n >> 24) & 0xff, (n >> 16) & 0xff,
+          (n >> 8) & 0xff, n & 0xff])); // int32
+      } else {
+        // int64
+        const hi = Math.floor(n / 0x100000000);
+        const lo = n >>> 0;
+        chunks.push(new Uint8Array([0xd3,
+          (hi >>> 24) & 0xff, (hi >>> 16) & 0xff,
+          (hi >>> 8) & 0xff, hi & 0xff,
+          (lo >>> 24) & 0xff, (lo >>> 16) & 0xff,
+          (lo >>> 8) & 0xff, lo & 0xff]));
+      }
+    }
+  }
+
+  /* ---------- 字符串（UTF-8 编码，关键！） ---------- */
+  function encodeString(str, chunks) {
+    // 先用 TextEncoder 把字符串转成 UTF-8 字节
+    const utf8 = new TextEncoder().encode(str);
+    const len = utf8.length;
+
+    let header;
+    if (len <= 31) {
+      // fixstr: 101xxxxx
+      header = new Uint8Array([0xa0 | len]);
+    } else if (len <= 0xff) {
+      // str8
+      header = new Uint8Array([0xd9, len]);
+    } else if (len <= 0xffff) {
+      // str16
+      header = new Uint8Array([0xda, len >> 8, len & 0xff]);
+    } else {
+      // str32
+      header = new Uint8Array([0xdb,
+        (len >>> 24) & 0xff, (len >>> 16) & 0xff,
+        (len >>> 8) & 0xff, len & 0xff]);
+    }
+    chunks.push(header);
+    chunks.push(utf8);
+  }
+
+  /* ---------- 数组 ---------- */
+  function encodeArray(arr, chunks) {
+    const len = arr.length;
+    if (len <= 15) {
+      chunks.push(new Uint8Array([0x90 | len])); // fixarray
+    } else if (len <= 0xffff) {
+      chunks.push(new Uint8Array([0xdc, len >> 8, len & 0xff])); // array16
+    } else {
+      chunks.push(new Uint8Array([0xdd,
+        (len >>> 24) & 0xff, (len >>> 16) & 0xff,
+        (len >>> 8) & 0xff, len & 0xff])); // array32
+    }
+    for (const item of arr) encodeValue(item, chunks);
+  }
+
+  /* ---------- Map（Object） ---------- */
+  function encodeMap(obj, chunks) {
+    const keys = Object.keys(obj);
+    const len = keys.length;
+    if (len <= 15) {
+      chunks.push(new Uint8Array([0x80 | len])); // fixmap
+    } else if (len <= 0xffff) {
+      chunks.push(new Uint8Array([0xde, len >> 8, len & 0xff])); // map16
+    } else {
+      chunks.push(new Uint8Array([0xdf,
+        (len >>> 24) & 0xff, (len >>> 16) & 0xff,
+        (len >>> 8) & 0xff, len & 0xff])); // map32
+    }
+    for (const k of keys) {
+      encodeString(k, chunks);
+      encodeValue(obj[k], chunks);
+    }
+  }
+
+  /* ================================================================
+     UI 逻辑
+     ================================================================ */
+  let lastBytes = null;
+
+  function doConvert() {
+    const input = document.getElementById('jsonInput').value.trim();
+    const status = document.getElementById('status');
+    const hexOutput = document.getElementById('hexOutput');
+    const hexGrid = document.getElementById('hexGrid');
+    const outputSection = document.getElementById('outputSection');
+    const infoRow = document.getElementById('infoRow');
+    const btnDownload = document.getElementById('btnDownload');
+
+    if (!input) {
+      setStatus('请先输入 JSON 内容', 'err');
+      return;
+    }
+
+    let data;
+    try {
+      data = JSON.parse(input);
+    } catch (e) {
+      setStatus('JSON 解析失败：' + e.message, 'err');
+      outputSection.style.display = 'none';
+      infoRow.style.display = 'none';
+      btnDownload.style.display = 'none';
+      return;
+    }
+
+    try {
+      const bytes = encodeMsgpack(data);
+      lastBytes = bytes;
+
+      // hex string
+      const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      hexOutput.textContent = hex;
+
+      // formatted hex grid
+      hexGrid.textContent = formatHexGrid(bytes);
+
+      // info
+      const jsonSize = new TextEncoder().encode(input).length;
+      const msgSize = bytes.length;
+      document.getElementById('infoJsonSize').textContent = jsonSize + ' B';
+      document.getElementById('infoMsgSize').textContent = msgSize + ' B';
+      const ratio = ((1 - msgSize / jsonSize) * 100).toFixed(1);
+      document.getElementById('infoRatio').textContent =
+        (ratio > 0 ? '-' : '+') + Math.abs(ratio) + '%';
+
+      outputSection.style.display = 'block';
+      infoRow.style.display = 'flex';
+      btnDownload.style.display = 'inline-block';
+      setStatus('转换成功！共 ' + msgSize + ' 字节', 'ok');
+    } catch (e) {
+      setStatus('编码失败：' + e.message, 'err');
+      outputSection.style.display = 'none';
+      infoRow.style.display = 'none';
+      btnDownload.style.display = 'none';
+    }
+  }
+
+  function formatHexGrid(bytes) {
+    const lines = [];
+    for (let i = 0; i < bytes.length; i += 16) {
+      const slice = bytes.slice(i, i + 16);
+      const addr = i.toString(16).padStart(4, '0').toUpperCase();
+      const hex = Array.from(slice)
+        .map(b => b.toString(16).padStart(2, '0').toUpperCase())
+        .join(' ')
+        .padEnd(16 * 3 - 1, ' ');
+      const ascii = Array.from(slice)
+        .map(b => (b >= 0x20 && b <= 0x7e) ? String.fromCharCode(b) : '·')
+        .join('');
+      lines.push(addr + '  ' + hex + '  |' + ascii + '|');
+    }
+    return lines.join('\n');
+  }
+
+  function doDownload() {
+    if (!lastBytes) return;
+    const blob = new Blob([lastBytes], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'metadata.msgpack';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function doClear() {
+    document.getElementById('jsonInput').value = '';
+    document.getElementById('outputSection').style.display = 'none';
+    document.getElementById('infoRow').style.display = 'none';
+    document.getElementById('btnDownload').style.display = 'none';
+    document.getElementById('status').textContent = '';
+    lastBytes = null;
+  }
+
+  function setStatus(msg, cls) {
+    const el = document.getElementById('status');
+    el.textContent = msg;
+    el.className = cls;
+  }
+
+  // 支持 Ctrl+Enter 快速转换
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('jsonInput').addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') doConvert();
+    });
+  });
+  </script>
+</body>
+</html>
